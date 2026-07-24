@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: team-curriculum-audit
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python team_app.py --no-open
+    envVars:
+      - key: TEAM_DATA_DIR
+        value: /data
+    disk:
+      name: team-data
+      mountPath: /data
+      sizeGB: 5

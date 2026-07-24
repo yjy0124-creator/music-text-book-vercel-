@@ -706,10 +706,15 @@ def serve_team_app(data_root: Path = Path("team_data"), host: str = "127.0.0.1",
 
 if __name__ == "__main__":
     import argparse
+    # Render/Railway 등 PaaS는 PORT 환경변수로 리스닝 포트를 지정하고 0.0.0.0 바인딩을
+    # 요구한다. PORT가 있으면 그 값을, 없으면 로컬 기본값(127.0.0.1:8780)을 사용한다.
+    hosted_port = os.environ.get("PORT")
     parser = argparse.ArgumentParser(description="팀용 교과서 원고 점검 웹 프로그램")
-    parser.add_argument("--data", type=Path, default=Path("team_data"))
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8780)
+    parser.add_argument("--data", type=Path,
+                        default=Path(os.environ.get("TEAM_DATA_DIR", "team_data")))
+    parser.add_argument("--host", default="0.0.0.0" if hosted_port else "127.0.0.1")
+    parser.add_argument("--port", type=int, default=int(hosted_port or 8780))
     parser.add_argument("--no-open", action="store_true")
     arguments = parser.parse_args()
-    serve_team_app(arguments.data, arguments.host, arguments.port, not arguments.no_open)
+    serve_team_app(arguments.data, arguments.host, arguments.port,
+                   not arguments.no_open and not hosted_port)
