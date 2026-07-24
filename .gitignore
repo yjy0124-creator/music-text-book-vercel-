@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 *.log
+.env
 team_data/
 output/
 out.txt

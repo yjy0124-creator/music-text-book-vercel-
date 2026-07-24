@@ -16,7 +16,7 @@ from typing import Any
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
-MODEL = "claude-sonnet-5"
+MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 REQUEST_TIMEOUT_SECONDS = 20
 
 SYSTEM_PROMPT = """
@@ -114,7 +114,7 @@ class _ClaudeActivityAdapter:
         try:
             body = json.dumps({
                 "model": MODEL,
-                "max_tokens": 1024,
+                "max_tokens": 4096,
                 "system": SYSTEM_PROMPT,
                 "messages": [{"role": "user", "content": _build_user_prompt(payload)}],
             }).encode("utf-8")
@@ -128,7 +128,11 @@ class _ClaudeActivityAdapter:
             )
             with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
                 response_data = json.loads(response.read().decode("utf-8"))
-            text = response_data["content"][0]["text"]
+            # 확장 사고(extended thinking) 응답은 content[0]이 thinking 블록이고
+            # 실제 텍스트는 그 뒤에 오므로, 인덱스가 아니라 type으로 찾는다.
+            text = next(
+                block["text"] for block in response_data["content"] if block.get("type") == "text"
+            )
             parsed = json.loads(text)
             return _validate(parsed)
         except (urllib.error.URLError, TimeoutError, KeyError, IndexError,

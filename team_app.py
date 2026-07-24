@@ -29,6 +29,27 @@ from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
 
+def _load_dotenv(path: Path = Path(".env")) -> None:
+    """`.env` 파일의 KEY=VALUE 줄을 환경변수로 불러온다 (이미 설정된 값은 덮어쓰지 않음).
+
+    OPENAI_API_KEY 같은 비밀 값을 셸 환경변수 대신 gitignore된 로컬 파일로
+    관리하기 위한 용도라 외부 패키지(dotenv) 없이 표준 라이브러리만 사용한다.
+    """
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+_load_dotenv()
+
+
 MAX_MANUSCRIPT_BYTES = 200 * 1024 * 1024
 MAX_REFERENCE_REQUEST_BYTES = 800 * 1024 * 1024
 MAX_STORED_UPLOAD_BYTES = 800 * 1024 * 1024
