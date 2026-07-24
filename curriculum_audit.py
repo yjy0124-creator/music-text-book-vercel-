@@ -814,19 +814,22 @@ def _render_pages_and_images(manuscript: Path, destination: Path, dpi: int = 144
     이미지가 무엇을 의미하는지 해석하는 기능은 AI 비전 어댑터의 범위다.
     """
     import pdfplumber  # type: ignore
-    import pypdfium2 as pdfium  # type: ignore
-    from PIL import ImageStat  # type: ignore
+    import pymupdf  # type: ignore
+    from PIL import Image, ImageStat  # type: ignore
 
     pages_dir, images_dir = destination / "pages", destination / "images"
     pages_dir.mkdir(parents=True, exist_ok=True)
     images_dir.mkdir(parents=True, exist_ok=True)
     scale = dpi / 72
-    pdfium_document = pdfium.PdfDocument(str(manuscript))
+    pymupdf_document = pymupdf.open(str(manuscript))
     results: list[dict[str, Any]] = []
     page_no = 0
     with pdfplumber.open(str(manuscript)) as plumber_document:
         for index, plumber_page in enumerate(plumber_document.pages):
-            full_image = pdfium_document[index].render(scale=scale).to_pil().convert("RGB")
+            pixmap = pymupdf_document[index].get_pixmap(
+                matrix=pymupdf.Matrix(scale, scale), colorspace=pymupdf.csRGB, alpha=False,
+            )
+            full_image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
             # 세로 A4 두 쪽이 나란히 이어붙어 가로로 올라온 원고이므로 좌우로 나눠 각각 한 쪽으로 셈한다.
             is_spread = _is_two_page_spread(plumber_page.width, plumber_page.height)
             half_width_pts = plumber_page.width / 2
@@ -875,7 +878,7 @@ def _render_pages_and_images(manuscript: Path, destination: Path, dpi: int = 144
                     "page": page_no, "page_image": page_path.relative_to(destination).as_posix(),
                     "width": image.width, "height": image.height, "images": page_items,
                 })
-    pdfium_document.close()
+    pymupdf_document.close()
     return results
 
 
