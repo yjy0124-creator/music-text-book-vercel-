@@ -1,0 +1,13 @@
+services:
+  team-app:
+    build: .
+    ports:
+      - "8780:8780"
+    volumes:
+      - team_data:/app/team_data
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    restart: "no"
+
+volumes:
+  team_data:

@@ -1,0 +1,9 @@
+.git
+__pycache__/
+*.pyc
+*.log
+.env
+team_data/
+output/
+node_modules/
+.vercel
