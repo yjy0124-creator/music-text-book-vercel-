@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
+import vercel_blob_store as blob_store
+
 
 def _load_dotenv(path: Path = Path(".env")) -> None:
     """`.env` 파일의 KEY=VALUE 줄을 환경변수로 불러온다 (이미 설정된 값은 덮어쓰지 않음).
@@ -90,7 +92,26 @@ class TeamStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self.uploads.mkdir(parents=True, exist_ok=True)
         self.results.mkdir(parents=True, exist_ok=True)
+        blob_store.pull_if_missing(self.db_path, "team.db")
         self._init_db()
+
+    def _blob_key(self, path: Path) -> str:
+        return path.resolve().relative_to(self.root).as_posix()
+
+    def _push_db(self) -> None:
+        blob_store.push(self.db_path, "team.db")
+
+    def _delete_blob_tree(self, directory: Path) -> None:
+        """로컬에서 지우기 전에, 그 안의 각 파일에 대응하는 Blob 객체도 지운다.
+
+        Vercel Blob에는 '접두어 삭제' 없이 키 하나씩 지워야 하므로, 아직 로컬에
+        파일이 남아있는 지금 트리를 순회해 실제로 존재하는 파일만 지운다.
+        """
+        if not directory.is_dir():
+            return
+        for file_path in directory.rglob("*"):
+            if file_path.is_file():
+                blob_store.delete(self._blob_key(file_path))
 
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
@@ -202,6 +223,7 @@ class TeamStore:
                 (reference_id, kind, original_name, str(stored_path), sha256, size_bytes,
                  revision.strip(), subject.strip(), _utc_now()),
             )
+        self._push_db()
         return {"id": reference_id, "kind": kind, "original_name": original_name,
                 "sha256": sha256, "size_bytes": size_bytes, "duplicate": False}
 
@@ -217,6 +239,7 @@ class TeamStore:
                 (job_id, original_name, str(stored_path), sha256, size_bytes,
                  target_level, work_titles, _utc_now()),
             )
+        self._push_db()
         return job_id
 
     def update_job(self, job_id: str, *, status: str, result_path: str | None = None,
@@ -227,6 +250,7 @@ class TeamStore:
                 "UPDATE audit_jobs SET status=?,result_path=?,error=?,completed_at=?,diff_path=? WHERE id=?",
                 (status, result_path, error, completed, diff_path, job_id),
             )
+        self._push_db()
 
     def previous_completed_job(self, original_name: str, exclude_job_id: str) -> dict[str, Any] | None:
         """같은 파일명으로 먼저 완료된 가장 최근 분석(재분석 비교 대상)을 찾는다."""
@@ -259,10 +283,12 @@ class TeamStore:
                    ON CONFLICT(fingerprint) DO NOTHING""",
                 (fingerprint, section, manuscript_text, _utc_now()),
             )
+        self._push_db()
 
     def unmark_false_positive(self, fingerprint: str) -> None:
         with closing(self.connect()) as db:
             db.execute("DELETE FROM false_positives WHERE fingerprint=?", (fingerprint,))
+        self._push_db()
 
     def delete_job(self, job_id: str) -> dict[str, Any]:
         """분석 이력 한 건과 업로드 사본·결과 파일을 삭제한다.
@@ -283,6 +309,7 @@ class TeamStore:
         manuscript_root = (self.uploads / "manuscripts").resolve()
         upload_dir = Path(item["stored_path"]).resolve().parent
         if upload_dir == manuscript_root or manuscript_root in upload_dir.parents:
+            self._delete_blob_tree(upload_dir)
             shutil.rmtree(upload_dir, ignore_errors=True)
 
         if item.get("result_path"):
@@ -295,10 +322,12 @@ class TeamStore:
                 results_root = self.results.resolve()
                 result_dir = Path(item["result_path"]).resolve().parent
                 if result_dir == results_root or results_root in result_dir.parents:
+                    self._delete_blob_tree(result_dir)
                     shutil.rmtree(result_dir, ignore_errors=True)
 
         with closing(self.connect()) as db:
             db.execute("DELETE FROM audit_jobs WHERE id=?", (job_id,))
+        self._push_db()
         return item
 
     def active_reference(self, kind: str) -> dict[str, Any] | None:
@@ -324,9 +353,11 @@ class TeamStore:
         reference_root = (self.uploads / "references").resolve()
         if target != reference_root and reference_root not in target.parents:
             raise ValueError("등록 자료 경로가 안전하지 않아 삭제하지 않았습니다.")
+        blob_store.delete(self._blob_key(target))
         target.unlink(missing_ok=True)
         with closing(self.connect()) as db:
             db.execute("DELETE FROM reference_files WHERE id=?", (reference_id,))
+        self._push_db()
         if item["kind"] == "textbook":
             self.textbook_directory()
         return item
@@ -343,8 +374,10 @@ class TeamStore:
             source = Path(row["stored_path"])
             target = directory / f"{row['sha256'][:10]}_{_safe_name(row['original_name'])}"
             expected.add(target.name)
-            if not target.exists() and source.exists():
-                shutil.copy2(source, target)
+            if not target.exists():
+                blob_store.pull_if_missing(source, self._blob_key(source))
+                if source.exists():
+                    shutil.copy2(source, target)
         for path in directory.glob("*.pdf"):
             if path.name not in expected:
                 path.unlink()
@@ -363,12 +396,14 @@ class TeamStore:
             if resolved.parent != self.root:
                 raise ValueError("초기화 대상 경로가 안전하지 않습니다.")
             if resolved.exists():
+                self._delete_blob_tree(resolved)
                 shutil.rmtree(resolved)
         self.uploads.mkdir(parents=True, exist_ok=True)
         self.results.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as db:
             db.execute("DELETE FROM reference_files")
             db.execute("DELETE FROM audit_jobs")
+        self._push_db()
 
 
 def _copy_upload(field: cgi.FieldStorage, destination: Path, maximum: int) -> tuple[str, int]:
@@ -406,7 +441,16 @@ class TeamApplication:
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="manuscript-audit")
 
     def submit(self, job_id: str) -> None:
-        self.executor.submit(self._run_audit, job_id)
+        # Vercel 서버리스 함수는 응답 이후 백그라운드 스레드 지속을 보장하지 않으므로,
+        # Vercel에서 실행 중(VERCEL 환경변수가 자동 주입됨)이면 동기적으로 끝까지 처리한다.
+        # 응답 형식(202 + job_id)은 그대로라 프런트엔드 폴링 코드는 수정할 필요가 없다 —
+        # 이미 완료 상태로 기록된 뒤 응답이 나가므로 첫 폴링에서 바로 결과를 보게 된다.
+        if os.environ.get("VERCEL"):
+            self._run_audit(job_id)
+        else:
+            self.executor.submit(self._run_audit, job_id)
+
+    _CACHE_FILE_NAMES = ("layout_reference.json", "term_reference.json", "textbook_content_cache.json")
 
     def _run_audit(self, job_id: str) -> None:
         job = self.store.job(job_id)
@@ -417,12 +461,18 @@ class TeamApplication:
         self.store.update_job(job_id, status="running")
         try:
             from curriculum_audit import audit_manuscript, compare_manuscript_audits
+            manuscript_path = Path(job["stored_path"])
+            curriculum_path = Path(curriculum["stored_path"])
+            blob_store.pull_if_missing(manuscript_path, self.store._blob_key(manuscript_path))
+            blob_store.pull_if_missing(curriculum_path, self.store._blob_key(curriculum_path))
+            for name in self._CACHE_FILE_NAMES:
+                blob_store.pull_if_missing(self.store.results / name, self.store._blob_key(self.store.results / name))
             textbook_dir = self.store.textbook_directory()
             # ANTHROPIC_API_KEY가 설정된 경우에만 AI 활동문 추천 어댑터를 사용한다.
             # 키가 없으면 ai_module=None이 되어 기존 규칙 기반 추천으로 그대로 동작한다.
             ai_module = "ai_activity_adapter" if os.environ.get("ANTHROPIC_API_KEY") else None
             result = audit_manuscript(
-                Path(job["stored_path"]), Path(curriculum["stored_path"]),
+                manuscript_path, curriculum_path,
                 self.store.results, ai_module, textbook_dir,
                 job.get("target_level") or "고등학교 1학년",
                 work_titles=[title.strip() for title in re.split(r"[,\n]", job.get("work_titles") or "") if title.strip()],
@@ -433,6 +483,7 @@ class TeamApplication:
             if previous and previous.get("result_path"):
                 try:
                     previous_json = Path(previous["result_path"]).with_suffix(".json")
+                    blob_store.pull_if_missing(previous_json, self.store._blob_key(previous_json))
                     diff_path = str(compare_manuscript_audits(previous_json, result, result.parent))
                 except Exception:
                     diff_path = None
@@ -440,6 +491,11 @@ class TeamApplication:
                 job_id, status="completed", result_path=str(result.with_suffix(".html")),
                 diff_path=diff_path,
             )
+            for name in self._CACHE_FILE_NAMES:
+                blob_store.push(self.store.results / name, self.store._blob_key(self.store.results / name))
+            for file_path in result.parent.rglob("*"):
+                if file_path.is_file():
+                    blob_store.push(file_path, self.store._blob_key(file_path))
         except Exception as exc:
             self.store.update_job(job_id, status="failed", error=f"{type(exc).__name__}: {exc}")
 
@@ -550,6 +606,7 @@ def _handler(application: TeamApplication) -> type[BaseHTTPRequestHandler]:
                 if application.store.results not in target.parents:
                     self.send_error(403)
                     return
+                blob_store.pull_if_missing(target, application.store._blob_key(target))
                 self._send_file(target)
                 return
             self.send_error(404)
@@ -651,6 +708,7 @@ def _handler(application: TeamApplication) -> type[BaseHTTPRequestHandler]:
                 token = uuid.uuid4().hex
                 target = application.store.uploads / "references" / kind / f"{token}_{original}"
                 digest, size = _copy_upload(field, target, MAX_MANUSCRIPT_BYTES)
+                blob_store.push(target, application.store._blob_key(target))
                 saved.append(application.store.add_reference(
                     kind, original, target, digest, size, revision, subject
                 ))
@@ -685,6 +743,7 @@ def _handler(application: TeamApplication) -> type[BaseHTTPRequestHandler]:
             if pages > MAX_MANUSCRIPT_PAGES:
                 target.unlink(missing_ok=True)
                 raise ValueError(f"원고는 최대 {MAX_MANUSCRIPT_PAGES}쪽까지 업로드할 수 있습니다.")
+            blob_store.push(target, application.store._blob_key(target))
             job_id = application.store.create_job(
                 original, target, digest, size, target_level, work_titles
             )
